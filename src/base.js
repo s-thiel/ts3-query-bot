@@ -3,7 +3,7 @@
 const TeamspeakQuery = require('teamspeak-query');
 const EventEmitter = require('events');
 
-class ts3QueryBot extends EventEmitter {
+class ts3QueryClient extends EventEmitter {
 
     /**
      * constructor
@@ -52,52 +52,10 @@ class ts3QueryBot extends EventEmitter {
      */
     async start() {    
         try {
-            this._log('Starting TS3Bot');
-
-            if(this.connected) {
-                throw new Error('TS3Bot is already connected');
-            }
-
-            if(!this.config.username || !this.config.password ) {
-                throw new Error('Missing config parameter');
-            }
-
-            this._log('Starting TS3 ServerQuery Connection');
-            this._log('Connect to', this.config.ip, this.config.port);
-            this._log('ServerID', this.config.serverID);
-                
-            if(this.config.type === 'ssh') {
-                this.query = new TeamspeakQuery.SSH({host : this.config.ip, port : this.config.port, username : this.config.username, password : this.config.password});
-            } else {
-                this.query = new TeamspeakQuery.Raw({host : this.config.ip, port : this.config.port});
-                await this.query.send('login', this.config.username, this.config.password);
-            }
-
-            await this.query.send('use', this.config.serverID);
-
-            if(this.config.nickname.length)
-                await this.query.send('clientupdate', {'client_nickname' : this.config.nickname});
-                
-            await this.query.send('servernotifyregister', { 'event': 'server' });
-            await this.query.send('servernotifyregister', { 'event': 'textprivate' });
-            await this.query.send('servernotifyregister', { 'event': 'textserver' });
-            await this.query.send('servernotifyregister', { 'event': 'textchannel' });
-            await this.query.send('servernotifyregister', { 'event': 'channel', id : 0 });
-
-            if(this.config.disableThrottle)
-                this.query.throttle.set('enable', false);
-
-            if(this.config.type === 'telnet') {
-                let sockEvents = ['error', 'drain', 'timeout', 'end', 'close'];
-                for(let sockEvent in sockEvents) {
-                    this.query.sock.on(sockEvent, (error) => {
-                        this.emit('socket-' + sockEvent, error);
-                        if(this.config.forceRestartOnError) {
-                            this.restart();
-                        }
-                    });
-                }
-            }
+            await this.servernotifyregister('server');
+            await this.servernotifyregister('textprivate');
+            await this.servernotifyregister('textserver');
+            await this.servernotifyregister('textchannel');
 
             this.query.on('cliententerview', (data) => {
                 if(this.clientEnterViewBlocked[data.client_unique_identifier])
@@ -117,7 +75,6 @@ class ts3QueryBot extends EventEmitter {
             });
 
             this.query.on('textmessage', (data) => {
-
                 if(data.invokername == this.config.nickname)
                     return;
 
@@ -128,10 +85,6 @@ class ts3QueryBot extends EventEmitter {
                 this.emit('serveredited', data);
             });
 
-            this.query.on('clientmoved', (data) => {
-                this.emit('clientmoved', data);
-            });
-
             this.query.on('channeledited', (data) => {
                 this.emit('channeledited', data);
             });
@@ -140,15 +93,9 @@ class ts3QueryBot extends EventEmitter {
                 this.emit('channeldescriptionchanged', data);
             })
 
-            if(this.config.disableKeepalive) {
+            if(this.config.disableKeepalive)
                 this.query.keepalive.enable(false);
-            } else {
-                this.checkInterval = setInterval(() => {
-                    this._checkConnection();
-                }, 1000 * 60);  
-            }
 
-            this.connected = true;
             this.emit('bot-rdy');
         } catch(error) {
             this.connected = false;
@@ -163,67 +110,11 @@ class ts3QueryBot extends EventEmitter {
         try {
             this._log('Stop TS3Bot');
             await this.query.disconnect();    
-            clearInterval(this.checkInterval);
-            this.connected = 0;
-            this.checkInterval;
+            this.connected = false;
         } catch(error) {
             this._log(error);
         }
     }
-
-    /**
-     * restart
-     */
-    async restart() {
-        try {
-            this._log('Restart TS3Bot')
-            await this.stop();
-            await this._wait(5000);
-            await this.start();
-        } catch (error) {
-            this._log(error);
-        } 
-    }
-
-    /**
-     * _ping
-     */
-    async _ping() {
-        return new Promise((resolve, reject) => {
-            this.query.send('version')
-            .then(() => {
-                resolve();
-            })
-            .catch((error) => {
-                reject(error);
-            });
-        });  
-    }
-
-    /**
-     * _checkConnection
-     */
-    async _checkConnection() {
-        try {
-            await this._ping();
-        } catch (error) {
-            this._log(error);
-            this.restart();
-        }
-    }
-
-    /**
-     * _wait
-     * 
-     * @param {Number} timeout 
-     */
-    async _wait(timeout) {
-        return new Promise((resolve, reject) => {
-            setTimeout(() => {
-                resolve();
-            }, timeout);
-        });
-      }
 
     /**
      * CUSTOM CLIENT STATS FUNCTIONS -------------------------------------------------------------------------
@@ -234,15 +125,11 @@ class ts3QueryBot extends EventEmitter {
      * 
      * @param {Object} data
      */
-    clientJoined(data)  {
-        let client = {
+    clientJoined(data)  { 
+        let client = Object.assign({
             start : new Date(),
             end : null,
-        };
-
-        for(let param in data) {
-            client[param] = data[param];
-        }
+        }, data);
 
         this.clients[data.clid] = client;
         this.emit('cliententerview', data);
@@ -271,12 +158,287 @@ class ts3QueryBot extends EventEmitter {
      * @param {Object} data 
      */
     clientSave(data) {
-        this.emit('bot-clientConnectionEnd', data);
+        this.emit('clientConnectionEnd', data);
     }
 
     /**
      * SERVER FUNCTIONS ---------------------------------------------------------------------------------
      */
+
+    /**
+     * servernotifyregister
+     * 
+     * Registers for a specified category of events on a virtual server to receive notification messages. 
+     * Depending on the notifications you've registered for, the server will send you a message on every event in the view of your 
+     * ServerQuery client (e.g. clients joining your channel, incoming text messages, server configuration changes, etc). 
+     * The event source is declared by the event parameter while id can be used to limit the notifications to a specific channel.
+     *  
+     * @param {String} event
+     * @param {Number} channelID
+     * @return {Promise}
+     */
+    async servernotifyregister(event, channelID) {
+        return new Promise((resolve, reject) => {
+
+            let props = {};
+
+            if(!event)
+                reject('ERROR_MISSING_PARAM');
+
+            props.event = event;
+
+            if(channelID)
+                props.id = channelID
+
+            this.query.send('servernotifyregister', props)
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * servernotifyunregister
+     * 
+     * Unregisters all events previously registered with servernotifyregister so you will no longer receive notification messages.
+     * 
+     * @return {Promise}
+     */
+    async servernotifyunregister() {
+        return new Promise((resolve, reject) => {
+            this.query.send('servernotifyunregister')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * help
+     * 
+     * Provides information about ServerQuery commands. 
+     * Used without parameters, help lists and briefly describes every command.
+     *  
+     * @param {String} cmd
+     * @return {Promise}
+     */
+    async help(cmd) {
+        return new Promise((resolve, reject) => {
+            this.query.send('help', cmd)
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * quit
+     * 
+     * Closes the ServerQuery connection to the TeamSpeak 3 Server instance
+     *  
+     * @return {Promise}
+     */
+    async quit() {
+        return new Promise((resolve, reject) => {
+            this.query.send('quit')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * login
+     * 
+     * Authenticates with the TeamSpeak 3 Server instance using given ServerQuery login credentials.
+     *  
+     * @param {String} username
+     * @param {String} password
+     * @return {Promise}
+     */
+    async login(username, password) {
+        return new Promise((resolve, reject) => {
+
+            if(!username || !password)
+                reject('ERROR_MISSING_PARAM');
+
+            this.query.send('login', {
+                client_login_name : username,
+                client_login_password : password
+            })
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * logout
+     * 
+     * Deselects the active virtual server and logs out from the server instance.
+     *  
+     * @return {Promise}
+     */
+    async logout() {
+        return new Promise((resolve, reject) => {
+            this.query.send('logout')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * version
+     * 
+     * Displays the servers version information including platform and build number.
+     * 
+     * @return {Promise}
+     */
+    async version() {
+        return new Promise((resolve, reject) => {
+            this.query.send('version')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * hostinfo
+     * 
+     * Displays detailed connection information 
+     * about the server instance including uptime, number of virtual
+     * servers online, traffic information, etc.
+     * 
+     * @return {Promise}
+     */
+    async hostinfo() {
+        return new Promise((resolve, reject) => {
+            this.query.send('hostinfo')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * instanceinfo
+     * 
+     * Displays detailed connection information 
+     * about the server instance including uptime, number of virtual
+     * servers online, traffic information, etc.
+     * 
+     * @return {Promise}
+     */
+    async instanceinfo() {
+        return new Promise((resolve, reject) => {
+            this.query.send('instanceinfo')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * instanceedit
+     * 
+     * Changes the server instance configuration using given properties.
+     * 
+     * @param {Object} props
+     * @return {Promise}
+     */
+    async instanceedit(props) {
+        return new Promise((resolve, reject) => {
+            this.query.send('instanceedit', props)
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * bindinglist
+     * 
+     * Displays a list of IP addresses used by the server 
+     * instance on multi-homed machines.
+     * 
+     * @return {Promise}
+     */
+    async bindinglist() {
+        return new Promise((resolve, reject) => {
+            this.query.send('bindinglist')
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
+
+    /**
+     * use
+     * 
+     * Displays a list of IP addresses used by the server 
+     * instance on multi-homed machines.
+     * 
+     * @param {Number} sid
+     * @param {Number} port
+     * @return {Promise}
+     */
+    async use(sid, port) {
+        return new Promise((resolve, reject) => {
+
+            let props = {};
+
+            if(!sid)
+                reject('ERROR_MISSING_PARAM');
+
+            props.sid = sid;
+
+            if(port)
+                props.port = port;
+
+            this.query.send('use', props)
+            .then((res) => {
+                resolve(res);
+            })
+            .catch((error) => {
+                reject(error);
+            });
+        });  
+    }
 
     /**
      * serverInfo
@@ -289,6 +451,32 @@ class ts3QueryBot extends EventEmitter {
     async serverInfo() {
         return new Promise((resolve, reject) => {
             this.query.send('serverinfo')
+            .then((res) => {
+                resolve(res);             
+            }).catch((error) => {
+                reject(error);
+            }); 
+        });
+    }
+
+    /**
+     * serverlist
+     * 
+     * Displays a list of virtual servers including their ID, status, number of clients online, etc. 
+     * If you're using the -all option, the server will list all virtual servers stored in the database. 
+     * This can be useful when multiple server instances with different machine IDs are using the same database.
+     * The machine ID is used to identify the server instance a virtual server is associated with. #
+     * The status of a virtual server can be either online, none and virtual. 
+     * While online and none are selfexplanatory, virtual is a bit more complicated. 
+     * Whenever you select a virtual server which is currently stopped, it will be started in virtual mode 
+     * which means you are able to change its configuration, create channels or change permissions, but no regular TeamSpeak 3 Client can connect. 
+     * As soon as the last ServerQuery client deselects the virtual server, its status will be changed back to none.
+     * 
+     * @return {Promise}
+     */
+    async serverlist() {
+        return new Promise((resolve, reject) => {
+            this.query.send('serverlist -uid -all')
             .then((res) => {
                 resolve(res);             
             }).catch((error) => {
@@ -615,6 +803,25 @@ class ts3QueryBot extends EventEmitter {
     /**
      * CLIENT FUNCTIONS --------------------------------------------------------------------------------------
      */
+
+    /**
+     * clientupdate
+     * 
+     * Change your ServerQuery clients settings using given properties.
+     * @param {Object} props 
+     * @return {Promise}
+     */
+    async clientupdate(props) {
+        return new Promise((resolve, reject) => {
+            this.query.send('clientupdate', props)
+            .then((res) => {
+                resolve(res);             
+            }).catch((error) => {
+                reject(error);
+            }); 
+        });
+    }
+
 
     /**
      * clientList
@@ -1211,6 +1418,4 @@ class ts3QueryBot extends EventEmitter {
 
 }
 
-module.exports = {
-    ts3QueryBot
-};
+module.exports = ts3QueryClient

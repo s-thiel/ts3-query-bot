@@ -1,4 +1,6 @@
 'use strict';
-const { ts3QueryBot } = require('./lib/ts3QueryBot');
+const sshQuery = require('./src/ssh');
+const telnetQuery = require('./src/telnet');
 
-exports.client = ts3QueryBot;
+exports.ssh = sshQuery;
+exports.telnet = telnetQuery
