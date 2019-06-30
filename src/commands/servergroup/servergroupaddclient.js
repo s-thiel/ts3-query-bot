@@ -22,7 +22,7 @@ async function servergroupAddClient(cluid, sgid) {
         throw new Error('ERROR_MISSING_PARAM');
 
     let result = await this.query.send('servergroupaddclient', {
-        cldbid: res.cldbid,
+        cldbid: client.cldbid,
         sgid: sgid
     });
 

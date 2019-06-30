@@ -22,6 +22,8 @@ async function servergroupdelclient(cluid, sgid) {
         cldbid: client.cldbid,
         sgid: sgid
     });
+
+    return result;
 }
 
 module.exports = servergroupdelclient;
